@@ -1,0 +1,1 @@
+We don't have the Warfarin dataset's feature names yet (though that doesn't matter for now), but we do know that the last column is the true "converged" Warfarin dose (so the appropriate dose, after the doctors tried different doses), and the second-to-last column is the dose bucket.
