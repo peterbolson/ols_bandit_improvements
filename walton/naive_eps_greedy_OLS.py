@@ -24,6 +24,7 @@ y_val = X[:,-1]
 X = X[:,:-2]
 N = X.shape[0]
 X = np.concatenate((np.ones((N,1)),X),axis=1)
+xbar = X.mean(axis=0)
 # number of arms
 arms = np.unique(y).astype(int)
 n_arms = arms.shape[0]
@@ -38,6 +39,13 @@ def loss01(y_pull, y_true):
 
 def fastOLS(y, X):
     return np.linalg.pinv(X.T @ X) @ X.T @ y
+
+def fastOLSconstr(y, X, xbar, mu):
+    Xi = np.linalg.pinv(X.T @ X)
+    Xy = X.T @ y
+    Gamma = xbar @ Xi
+    gamma = Gamma @ xbar.T
+    return Xi @ Xy + Gamma.T * (Gamma @ Xy - mu)/gamma
 
 # include lasso and ridge and maybe random forest
 
@@ -54,19 +62,26 @@ yloss = np.zeros((N,n_arms))
 for y_pull in arms:
     yloss[:,y_pull] = loss01(y_pull,y)
 
+mu = 1 - (-1*yloss + 1).sum(axis=0)/len(yloss)
+fOLSc = []
+for i in range(n_arms):
+    fOLSc.append(lambda y, X: fastOLSconstr(y, X, xbar, mu[i]))
+
 class FS_Bandit:
     """Forced Sampling Bandit: includes an initial block of forced sampling followed by
      epsilon-greedy sampling 'sample' or the forced sampling schedule 'schedule' of [REF]. User provides
      the estimator (default is OLS) and selector (default is linear)"""
 
     def __init__(self, yloss, X, sample='epsilon', gr_filter=False, estimator=fastOLS,
-            selector=linear_arm, forced_samples=None, q=1, epsilon=.1, h=.5,
-            seed=None, oracle=True):
+            est_constr=False, selector=linear_arm, forced_samples=None, q=1, epsilon=.1, h=.5,
+            seed=None, oracle=True, schedule_overlap=False):
         self.yloss0 = yloss
         self.X0 = X
         self.sample = sample
+        self.schedule_overlap = schedule_overlap
         self.gr_filter = gr_filter
         self.estimator = estimator
+        self.est_constr = est_constr
         self.selector = selector
         self.N = X.shape[0]
         self.k = X.shape[1]
@@ -115,7 +130,8 @@ class FS_Bandit:
         for i in range(1,n_arms+1):
             idx_i = np.array([(2**n-1)*n_arms*q+j for (n, j) in
                 itertools.product(range(int(np.log2(N/(n_arms*1) + 1)+1)), range(q*(i-1), q*i))])
-            idx_i = idx_i - (fN)
+            if self.schedule_overlap:
+                idx_i = idx_i - (fN)
             idx_i = idx_i[(idx_i >= 0) & (idx_i < gN)]
             greedy[idx_i] = i-1
         return greedy
@@ -156,7 +172,10 @@ class FS_Bandit:
         # oracle parameters
         oracle_params = []
         for i in range(n_arms):
-            mod = self.estimator(self.yloss[:,i], self.X)
+            if self.est_constr:
+                mod = self.estimator[i](self.yloss[:,i], self.X)
+            else:
+                mod = self.estimator(self.yloss[:,i], self.X)
             oracle_params.append(mod)
         self.oracle_params = oracle_params
         # oracle arm choices
@@ -208,7 +227,10 @@ class FS_Bandit:
         X = np.concatenate([self.X_arm_FSS[i][:n_to_t],
                         self.X_arm_GR[i][:g_to_t],
                         self.X[t,:].reshape((1,self.k))], axis=0)
-        return self.estimator(yloss, X)
+        if self.est_constr:
+            return self.estimator[i](yloss, X)
+        else:
+            return self.estimator(yloss, X)
 
     def do_forced(self):
         t = self.t
@@ -221,7 +243,11 @@ class FS_Bandit:
         for i in range(self.n_arms):
             if self.param_needs_update[i]:
                 n_to_t = (self.sampling[:(t+1)]==i).sum()
-                self.param[i] = self.estimator(self.yloss_arm_FSS[i][:n_to_t],
+                if self.est_constr:
+                    self.param[i] = self.estimator[i](self.yloss_arm_FSS[i][:n_to_t],
+                    self.X_arm_FSS[i][:n_to_t,:])
+                else:
+                    self.param[i] = self.estimator(self.yloss_arm_FSS[i][:n_to_t],
                     self.X_arm_FSS[i][:n_to_t,:])
                 self.param_needs_update[i] = False
 
@@ -249,6 +275,12 @@ class FS_Bandit:
                 self.oracle()
                 self.sim_orac_loss.append(self.oracle_loss)
 
+    def gen_label(self):
+        s1 = ''
+        if self.est_constr:
+            s1 = 'constr '
+        return s1 + self.sample
+
     def plot_frac_incorrect(self, show_conf_bounds=True, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
@@ -260,7 +292,7 @@ class FS_Bandit:
             avg_cumloss = cumloss.mean(axis=1)
             cumloss_upper = np.quantile(cumloss, .975, axis=1)
             cumloss_lower = np.quantile(cumloss, .025, axis=1)
-            line_label = self.sample
+            line_label = self.gen_label()
             if i==1:
                 line_label = 'oracle'
             ax.plot(points, avg_cumloss/(points+1), label=line_label)
@@ -273,16 +305,20 @@ class FS_Bandit:
         ax.set_ylabel('Fraction Incorrect')
         return ax
 
-bandit = FS_Bandit(yloss, X, sample='schedule', gr_filter=True, forced_samples=50, q=2, epsilon=.15, h=1)
-bandit.run()
-sim = False
+bandit = FS_Bandit(yloss, X, sample='schedule', gr_filter=True, forced_samples=94, q=1, epsilon=.15, h=1.2)
+#bandit.run()
+sim = True
 if sim:
-    bandit.simulate(nsim=10, replace=False)
+    bandit.simulate(nsim=8, replace=False)
     ax1 = bandit.plot_frac_incorrect()
-    bandit.sample = 'epsilon'
-    bandit.run_oracle = False
-    bandit.simulate(nsim=10, replace=False)
-    bandit.plot_frac_incorrect(ax=ax1)
-    ax1.legend()
+    #bandit.sample = 'epsilon'
+#    bandit.run_oracle = False
+#    bandit.est_constr = True
+#    bandit.estimator = fOLSc
+#    bandit.simulate(nsim=8, replace=False)
+#    bandit.plot_frac_incorrect(ax=ax1)
+    plt.legend()
+    plt.ylim(.2,.8)
+    plt.grid()
     plt.show()
 
